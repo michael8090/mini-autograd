@@ -1,4 +1,6 @@
-use std::{cell::RefCell, ops::{Add, AddAssign, Mul}, rc::Rc};
+// use std::{borrow::BorrowMut, cell::RefCell, ops::{Add, AddAssign, Mul}, rc::Rc};
+
+use std::{cell::RefCell, ops::Add, rc::Rc};
 
 enum Ops {
     Add,
@@ -18,7 +20,7 @@ struct Record {
 struct Value {
     value: f32,
     idx: ValueIndex,
-    store: Rc<RefCell<ValueStore>>,
+    builder: ValueBuilder,
     record: Option<Record>
 }
 
@@ -29,14 +31,6 @@ struct ValueStore {
 impl ValueStore {
     fn new() -> Self {
         Self {values: vec![]}
-    }
-
-    fn value(&mut self, v: f32) -> Value {
-        let idx = self.values.len();
-        let value = Value{value: v, idx, store: Rc::new(RefCell::new(self)), record: None};
-        self.values.push(value);
-
-        value
     }
 
     fn bfs(&mut self, entry_index: ValueIndex,f: impl Fn(&mut Value)) {
@@ -52,7 +46,7 @@ impl ValueStore {
 
     fn zero_grads(&mut self) {
         for v in &mut self.values {
-            if let Some(mut r) = v.record {
+            if let Some(r) = &mut v.record {
                 r.grad = 0.0;
             }
         }
@@ -94,11 +88,11 @@ impl ValueStore {
     }
 }
 
-impl Add<&Value> for &Value {
-    type Output = Value;
+impl<'a> Add<&'a Value> for &Value {
+    type Output = &'a Value;
 
     fn add(self, rhs:&Value) -> Self::Output {
-        let mut out = self.store.borrow_mut().value(self.value + rhs.value);
+        let mut out = self.builder.value(self.value + rhs.value);
         out.record = Some(Record {
             grad: 0.0,
             ops: Ops::Add,
@@ -109,10 +103,35 @@ impl Add<&Value> for &Value {
     }
 }
 
+struct ValueBuilder (Rc<RefCell<ValueStore>>);
+
+impl ValueBuilder {
+    fn new() -> Self {
+        let store = ValueStore::new();
+        Self (Rc::new(RefCell::new(store)))
+    }
+
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+
+    fn value(&mut self, v: f32) -> &Value {
+        let mut store = self.0.borrow_mut();
+        let idx = store.values.len();
+        let value = Value{value: v, idx, builder: self.clone(), record: None};
+
+        {let values = &mut store.values;
+        values.push(value);}
+        let values = &store.values;
+
+        &values[idx]
+    }
+}
+
 fn main() {
-    let mut store = ValueStore::new();
-    let mut v1 = store.value(1.0);
-    let mut v2 = store.value(2.0);
-    let a = &v1 + &v2;
+    let mut builder = ValueBuilder::new();
+    let mut v1 = builder.value(1.0);
+    let mut v2 = builder.value(2.0);
+    let a = v1 + v2;
     println!("{:?}", a.value);
 }
