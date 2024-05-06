@@ -1,6 +1,6 @@
 // use std::{borrow::BorrowMut, cell::RefCell, ops::{Add, AddAssign, Mul}, rc::Rc};
 
-use std::{cell::RefCell, ops::Add, rc::Rc};
+use std::{cell::RefCell, ops::{Add, Div, Mul, Sub}, rc::Rc};
 
 enum Ops {
     Add,
@@ -9,19 +9,18 @@ enum Ops {
     Relu,
 }
 
-type ValueIndex = usize;
-
-struct Record {
-    grad: f32,
-    ops: Ops,
-    args: Vec<ValueIndex>
+#[derive(Clone)]
+struct ValueHandle {
+    idx: usize,
+    builder: ValueBuilder,
 }
 
 struct Value {
     value: f32,
-    idx: ValueIndex,
-    builder: ValueBuilder,
-    record: Option<Record>
+    handle: ValueHandle,
+    grad: f32,
+    ops: Option<Ops>,
+    args: Option<Vec<ValueHandle>>
 }
 
 struct ValueStore {
@@ -33,47 +32,58 @@ impl ValueStore {
         Self {values: vec![]}
     }
 
-    fn bfs(&mut self, entry_index: ValueIndex,f: impl Fn(&mut Value)) {
-        let mut queue: Vec<ValueIndex> = vec![entry_index];
+    fn get_value(&self, handle: &ValueHandle) -> &mut Value {
+        unsafe {
+            &mut *(&self.values[handle.idx] as *const _ as *mut Value)
+        }
+    }
 
-        while let Some(valueIndex) = queue.pop() {
-            let value = &mut self.values[valueIndex];
-            f(value);
 
-            value.record.map(|r| queue.extend(r.args));
+    fn bfs(&self, entry_handle: ValueHandle, f: impl Fn(&ValueHandle)) {
+        let mut queue: Vec<ValueHandle> = vec![entry_handle];
+
+        while let Some(value_handle) = queue.pop() {
+            let value = &self.values[value_handle.idx];
+            f(&value.handle);
+
+            value.args.clone().map(|args| queue.extend(args));
         }
     }
 
     fn zero_grads(&mut self) {
         for v in &mut self.values {
-            if let Some(r) = &mut v.record {
-                r.grad = 0.0;
-            }
+            v.grad = 0.0;
         }
     }
 
-    fn backward(&mut self, entry_index: ValueIndex) {
-        let entry_value = &mut self.values[entry_index];
-        let mut record = entry_value.record.unwrap();
-        record.grad = 1.0;
-        self.bfs(entry_index, |value| {
-            match value.record {
-                Some(out_record) => {
-                    match out_record.ops {
+    fn backward(&mut self, entry_handle: ValueHandle) {
+        let entry_value = self.get_value(&entry_handle);
+        entry_value.grad = 1.0;
+        self.bfs(entry_handle, |h| {
+            let out_value = &self.get_value(h);
+            match &out_value.ops {
+                Some(ops) => {
+                    match ops {
                         Ops::Add => {
-                            let a = &mut self.values[out_record.args[0]];
-                            let b = &mut self.values[out_record.args[1]];
-                            a.record.unwrap().grad += out_record.grad;
-                            b.record.unwrap().grad += out_record.grad;
+                            let args = out_value.args.as_ref().unwrap();
+                            let a = self.get_value(&args[0]);
+                            let b = self.get_value(&args[1]);
+                            a.grad += out_value.grad;
+                            b.grad += out_value.grad;
                         },
                         Ops::Mul => {
-                            let a = &mut self.values[out_record.args[0]];
-                            let b = &mut self.values[out_record.args[1]];
-                            a.record.unwrap().grad += b.value * out_record.grad;
-                            b.record.unwrap().grad += a.value * out_record.grad;
+                            let args = out_value.args.as_ref().unwrap();
+                            let a = self.get_value(&args[0]);
+                            let b = self.get_value(&args[1]);
+                            a.grad += b.value * out_value.grad;
+                            b.grad += a.value * out_value.grad;
                         },
                         Ops::Pow => {
-
+                            let args = out_value.args.as_ref().unwrap();
+                            let a = self.get_value(&args[0]);
+                            let b = self.get_value(&args[1]);
+                            a.grad += b.value * a.value.powf(b.value - 1.0) * out_value.grad;
+                            b.grad += out_value.value * a.value.ln() * out_value.grad;
                         },
                         Ops::Relu => {
 
@@ -81,28 +91,91 @@ impl ValueStore {
                     }
                 }
                 None => {
-                    panic!("a manually created value doesn't have derivative against any other variable");
+                    // panic!("a manually created value doesn't have derivative against any other variable");
                 }
             }
         });
     }
 }
 
-impl<'a> Add<&'a Value> for &Value {
-    type Output = &'a Value;
+impl Add<&ValueHandle> for &ValueHandle {
+    type Output = ValueHandle;
 
-    fn add(self, rhs:&Value) -> Self::Output {
-        let mut out = self.builder.value(self.value + rhs.value);
-        out.record = Some(Record {
-            grad: 0.0,
-            ops: Ops::Add,
-            args: vec![self.idx, rhs.idx],
-        });
+    fn add(self, rhs:&ValueHandle) -> Self::Output {
+        let out_data;
+        {
+            let store = self.builder.0.borrow();
+            out_data = store.values[self.idx].value + store.values[rhs.idx].value;
+        }
+        let out = self.builder.value(out_data);
+        {
+            let store = self.builder.0.borrow();
+            let out_value = store.get_value(&out);
+            out_value.ops = Some(Ops::Add);
+            out_value.args = Some(vec![self.clone(), rhs.clone()]);
+        }
 
         out
     }
 }
 
+impl Mul<&ValueHandle> for &ValueHandle {
+    type Output = ValueHandle;
+
+    fn mul(self, rhs:&ValueHandle) -> Self::Output {
+        let out_data;
+        {
+            let store = self.builder.0.borrow();
+            out_data = store.values[self.idx].value * store.values[rhs.idx].value;
+        }
+        let out = self.builder.value(out_data);
+        {
+            let store = self.builder.0.borrow();
+            let out_value = store.get_value(&out);
+            out_value.ops = Some(Ops::Mul);
+            out_value.args = Some(vec![self.clone(), rhs.clone()]);
+        }
+
+        out
+    }
+}
+
+impl ValueHandle {
+    fn pow(&self, rhs:&ValueHandle) -> Self {
+        let out_data;
+        {
+            let store = self.builder.0.borrow();
+            out_data = store.get_value(self).value.powf(store.get_value(rhs).value);
+        }
+        let out = self.builder.value(out_data);
+        {
+            let store = self.builder.0.borrow();
+            let out_value = store.get_value(&out);
+            out_value.ops = Some(Ops::Mul);
+            out_value.args = Some(vec![self.clone(), rhs.clone()]);
+        }
+
+        out
+    }
+}
+
+impl Sub<&ValueHandle> for &ValueHandle {
+    type Output = ValueHandle;
+
+    fn sub(self, rhs:&ValueHandle) -> Self::Output {
+        self + &(&self.builder.value(-1.0) * rhs)
+    }
+}
+
+impl Div<&ValueHandle> for &ValueHandle {
+    type Output = ValueHandle;
+
+    fn div(self, rhs:&ValueHandle) -> Self::Output {
+        self * &(rhs.pow(&self.builder.value(-1.0)))
+    }
+}
+
+#[derive(Clone)]
 struct ValueBuilder (Rc<RefCell<ValueStore>>);
 
 impl ValueBuilder {
@@ -111,27 +184,26 @@ impl ValueBuilder {
         Self (Rc::new(RefCell::new(store)))
     }
 
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-
-    fn value(&mut self, v: f32) -> &Value {
+    fn value(&self, v: f32) -> ValueHandle {
         let mut store = self.0.borrow_mut();
-        let idx = store.values.len();
-        let value = Value{value: v, idx, builder: self.clone(), record: None};
+        let handle = ValueHandle{ idx: store.values.len(), builder: self.clone() };
+        let ret = handle.clone();
+        let value = Value{value: v, handle, grad: 0.0, ops: None, args: None};
 
-        {let values = &mut store.values;
-        values.push(value);}
-        let values = &store.values;
+        store.values.push(value);
 
-        &values[idx]
+        ret
     }
 }
 
 fn main() {
-    let mut builder = ValueBuilder::new();
-    let mut v1 = builder.value(1.0);
-    let mut v2 = builder.value(2.0);
-    let a = v1 + v2;
-    println!("{:?}", a.value);
+    let builder = ValueBuilder::new();
+    let v1 = &builder.value(1.0);
+    let v2 = &builder.value(2.0);
+    let v3 = &builder.value(3.0);
+    let a = &(v1 * v2) + &(v3 * v3);
+    let mut store = builder.0.borrow_mut();
+    store.zero_grads();
+    store.backward(a);
+    println!("{:?}", store.get_value(v3).grad);
 }
