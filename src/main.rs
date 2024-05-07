@@ -154,7 +154,7 @@ impl ValueHandle {
         {
             let store = self.builder.0.borrow();
             let out_value = store.get_value(&out);
-            out_value.ops = Some(Ops::Mul);
+            out_value.ops = Some(Ops::Pow);
             out_value.args = Some(vec![self.clone(), rhs.clone()]);
         }
 
@@ -222,7 +222,7 @@ fn main() {
     let v1 = &builder.value(1.0);
     let v2 = &builder.value(2.0);
     let v3 = &builder.value(3.0);
-    let a = (&(v1 / v2) * &(v3 - v2)).relu();
+    let a = (&(v1 / v2) * &(v3 - v2)).pow(&builder.value(10.0)).relu();
     let mut store = builder.0.borrow_mut();
     store.zero_grads();
     store.backward(a);
