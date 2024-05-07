@@ -86,7 +86,10 @@ impl ValueStore {
                             b.grad += out_value.value * a.value.ln() * out_value.grad;
                         },
                         Ops::Relu => {
-
+                            let args = out_value.args.as_ref().unwrap();
+                            let a = self.get_value(&args[0]);
+                            let grad = if a.value > 0.0 {1.0} else {0.0};
+                            a.grad += grad * out_value.grad;
                         }
                     }
                 }
@@ -157,6 +160,24 @@ impl ValueHandle {
 
         out
     }
+
+    fn relu(&self) -> Self {
+        let out_data;
+        {
+            let store = self.builder.0.borrow();
+            let self_data = store.get_value(self).value;
+            out_data = self_data.max(0.0);
+        }
+        let out = self.builder.value(out_data);
+        {
+            let store = self.builder.0.borrow();
+            let out_value = store.get_value(&out);
+            out_value.ops = Some(Ops::Relu);
+            out_value.args = Some(vec![self.clone()]);
+        }
+
+        out
+    }
 }
 
 impl Sub<&ValueHandle> for &ValueHandle {
@@ -201,7 +222,7 @@ fn main() {
     let v1 = &builder.value(1.0);
     let v2 = &builder.value(2.0);
     let v3 = &builder.value(3.0);
-    let a = &(v1 * v2) + &(v3 * v3);
+    let a = (&(v1 / v2) * &(v3 - v2)).relu();
     let mut store = builder.0.borrow_mut();
     store.zero_grads();
     store.backward(a);
